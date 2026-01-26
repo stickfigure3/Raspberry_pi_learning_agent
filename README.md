@@ -10,12 +10,9 @@ A self-updating Raspberry Pi server that automatically pulls changes from Git.
 
 ```bash
 cd /Users/akash/Desktop/Employnmnet\ 2026/Projects/raspberry_pi
-git init
 git add .
-git commit -m "Initial commit"
-git branch -M main
-git remote add origin <your-repo-url>
-git push -u origin main
+git commit -m "Your changes"
+git push
 ```
 
 2. **Make changes locally, commit, and push** — Your Pi will automatically pull them!
@@ -29,7 +26,7 @@ git push -u origin main
 SSH into your Pi and run:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/<your-username>/<your-repo>/main/scripts/pi_setup.sh | bash -s -- <your-repo-url>
+curl -sSL https://raw.githubusercontent.com/stickfigure3/Raspberry_pi_learning_agent/main/scripts/pi_setup.sh | bash -s -- git@github.com:stickfigure3/Raspberry_pi_learning_agent.git
 ```
 
 #### Option B: Manual Setup
@@ -49,14 +46,14 @@ sudo apt-get install -y git python3 python3-pip
 
 3. **Clone this repository:**
 ```bash
-git clone <your-repo-url> ~/raspberry_pi
+git clone git@github.com:stickfigure3/Raspberry_pi_learning_agent.git ~/raspberry_pi
 cd ~/raspberry_pi
 ```
 
 4. **Run the setup script:**
 ```bash
 chmod +x scripts/pi_setup.sh
-./scripts/pi_setup.sh <your-repo-url>
+./scripts/pi_setup.sh git@github.com:stickfigure3/Raspberry_pi_learning_agent.git
 ```
 
 ---
