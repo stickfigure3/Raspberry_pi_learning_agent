@@ -33,9 +33,7 @@ curl -sSL https://raw.githubusercontent.com/stickfigure3/Raspberry_pi_learning_a
 
 1. **SSH into your Raspberry Pi:**
 ```bash
-ssh pi@raspberrypi.local
-# or
-ssh pi@<your-pi-ip-address>
+ssh akash@192.168.50.225
 ```
 
 2. **Install Git and Python:**
@@ -78,7 +76,7 @@ The sync service is configured via environment variables in the systemd service 
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `GIT_SYNC_REPO_PATH` | `/home/pi/raspberry_pi` | Path to the local repository |
+| `GIT_SYNC_REPO_PATH` | `/home/$USER/raspberry_pi` | Path to the local repository |
 | `GIT_SYNC_BRANCH` | `main` | Git branch to track |
 | `GIT_SYNC_INTERVAL` | `60` | Seconds between update checks |
 | `GIT_SYNC_POST_PULL` | `scripts/on_update.sh` | Script to run after updates |
@@ -118,7 +116,7 @@ sudo systemctl disable git-sync
 ```bash
 #!/bin/bash
 # Example: Restart a Python app
-cd /home/pi/raspberry_pi
+cd ~/raspberry_pi
 pip3 install -r requirements.txt
 sudo systemctl restart my-app.service
 ```
@@ -129,7 +127,7 @@ sudo systemctl restart my-app.service
 
 1. **Generate SSH key on your Pi:**
 ```bash
-ssh-keygen -t ed25519 -C "pi@raspberrypi"
+ssh-keygen -t ed25519 -C "akash@raspberrypi"
 cat ~/.ssh/id_ed25519.pub
 ```
 
@@ -149,7 +147,7 @@ journalctl -u git-sync -n 50 --no-pager
 
 **Permission issues:**
 ```bash
-sudo chown -R pi:pi ~/raspberry_pi
+sudo chown -R $USER:$USER ~/raspberry_pi
 ```
 
 **Network issues:**

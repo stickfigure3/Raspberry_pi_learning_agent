@@ -5,7 +5,8 @@
 set -e
 
 REPO_URL="${1:-}"
-INSTALL_DIR="/home/pi/raspberry_pi"
+CURRENT_USER="$(whoami)"
+INSTALL_DIR="/home/$CURRENT_USER/raspberry_pi"
 SERVICE_NAME="git-sync"
 
 # Colors for output
@@ -30,12 +31,9 @@ echo "================================================"
 echo "  Raspberry Pi Auto-Deploy Setup"
 echo "================================================"
 echo ""
-
-# Check if running as pi user
-if [ "$USER" != "pi" ]; then
-    print_warning "Running as user '$USER' instead of 'pi'"
-    print_warning "You may need to adjust paths in the service file"
-fi
+echo "Running as user: $CURRENT_USER"
+echo "Install directory: $INSTALL_DIR"
+echo ""
 
 # Check for repo URL argument
 if [ -z "$REPO_URL" ]; then
@@ -87,9 +85,29 @@ print_status "Setting up scripts..."
 chmod +x auto_deploy/git_sync.py
 chmod +x scripts/*.sh 2>/dev/null || true
 
-# Install the systemd service
-print_status "Installing systemd service..."
-sudo cp auto_deploy/git-sync.service /etc/systemd/system/
+# Create systemd service with correct user paths
+print_status "Creating systemd service for user $CURRENT_USER..."
+cat << EOF | sudo tee /etc/systemd/system/git-sync.service > /dev/null
+[Unit]
+Description=Git Auto-Sync Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=$CURRENT_USER
+WorkingDirectory=$INSTALL_DIR
+Environment="GIT_SYNC_REPO_PATH=$INSTALL_DIR"
+Environment="GIT_SYNC_BRANCH=main"
+Environment="GIT_SYNC_INTERVAL=60"
+Environment="GIT_SYNC_POST_PULL=scripts/on_update.sh"
+ExecStart=/usr/bin/python3 $INSTALL_DIR/auto_deploy/git_sync.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
 sudo systemctl daemon-reload
 sudo systemctl enable git-sync.service
 sudo systemctl start git-sync.service
@@ -117,5 +135,6 @@ echo "  Restart:        sudo systemctl restart git-sync"
 echo "  Stop:           sudo systemctl stop git-sync"
 echo ""
 echo "Repository location: $INSTALL_DIR"
+echo "User: $CURRENT_USER"
 echo ""
 print_status "Your Raspberry Pi will now auto-pull updates every 60 seconds!"
