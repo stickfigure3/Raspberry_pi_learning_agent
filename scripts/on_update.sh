@@ -1,7 +1,6 @@
 #!/bin/bash
 # Post-pull hook script
 # This runs automatically after the repo is updated
-# Add your deployment commands here
 
 set -e
 
@@ -14,15 +13,16 @@ echo "================================================"
 
 cd "$REPO_DIR"
 
-# Example: Restart your application service
-# sudo systemctl restart your-app.service
+# Install Python dependencies if requirements changed
+if [ -f requirements.txt ]; then
+    echo "Installing Python dependencies..."
+    pip3 install -r requirements.txt --break-system-packages -q
+fi
 
-# Example: Install new Python dependencies
-# if [ -f requirements.txt ]; then
-#     pip3 install -r requirements.txt
-# fi
-
-# Example: Run database migrations
-# python3 manage.py migrate
+# Restart audio player service if it exists
+if systemctl is-enabled audio-player.service &>/dev/null; then
+    echo "Restarting audio player service..."
+    sudo systemctl restart audio-player.service
+fi
 
 echo "Post-update script completed successfully"

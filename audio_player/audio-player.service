@@ -1,0 +1,16 @@
+[Unit]
+Description=Raspberry Pi Audio Player Server
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=akash
+WorkingDirectory=/home/akash/raspberry_pi/audio_player
+Environment="AUDIO_DIR=/home/akash/raspberry_pi/audio_files"
+ExecStart=/usr/bin/python3 /home/akash/raspberry_pi/audio_player/server.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
