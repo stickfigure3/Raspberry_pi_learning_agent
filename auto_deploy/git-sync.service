@@ -1,0 +1,19 @@
+[Unit]
+Description=Git Auto-Sync Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/raspberry_pi
+Environment="GIT_SYNC_REPO_PATH=/home/pi/raspberry_pi"
+Environment="GIT_SYNC_BRANCH=main"
+Environment="GIT_SYNC_INTERVAL=60"
+Environment="GIT_SYNC_POST_PULL=scripts/on_update.sh"
+ExecStart=/usr/bin/python3 /home/pi/raspberry_pi/auto_deploy/git_sync.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
