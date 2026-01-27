@@ -4,7 +4,9 @@
 spotify:
   client_id: "your_spotify_client_id"
   client_secret: "your_spotify_client_secret"
-  redirect_uri: "http://localhost:5001/callback"
+  # IMPORTANT: Replace with your Pi's IP address
+  # Also add this EXACT URL to your Spotify app's redirect URIs in the Developer Dashboard
+  redirect_uri: "http://192.168.50.225:5001/callback"
   
 # Spotify playback options
 playback:

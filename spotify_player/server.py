@@ -86,26 +86,96 @@ def auth():
         return jsonify({"error": "Not configured"}), 500
     
     auth_url = spotify_api.get_auth_url()
-    return jsonify({
-        "auth_url": auth_url,
-        "message": "Visit this URL to authorize, then you'll be redirected back"
-    })
+    
+    # Return HTML page with direct link for easier clicking
+    return f"""
+    <html>
+    <head>
+        <title>Spotify Authorization</title>
+        <style>
+            body {{ font-family: Arial; padding: 40px; max-width: 600px; margin: 0 auto; }}
+            .info-box {{ background: #f0f0f0; padding: 20px; border-radius: 8px; margin: 20px 0; }}
+            .redirect-uri {{ background: #fff; padding: 10px; border: 1px solid #ddd; font-family: monospace; word-break: break-all; }}
+            a.button {{ display: inline-block; background: #1DB954; color: white; padding: 15px 30px; text-decoration: none; border-radius: 5px; font-weight: bold; margin: 20px 0; }}
+            a.button:hover {{ background: #1ed760; }}
+        </style>
+    </head>
+    <body>
+        <h1>🎵 Spotify Authorization</h1>
+        <div class="info-box">
+            <h3>Important: Redirect URI</h3>
+            <p>Make sure this exact URL is added in your Spotify app settings:</p>
+            <div class="redirect-uri">{spotify_api.redirect_uri}</div>
+        </div>
+        <p>Click the button below to authorize:</p>
+        <a href="{auth_url}" class="button">Authorize with Spotify</a>
+        <hr>
+        <p><small>Or copy this URL: <a href="{auth_url}">{auth_url}</a></small></p>
+    </body>
+    </html>
+    """
 
 
 @app.route('/callback')
 def callback():
     """Handle OAuth callback."""
+    error = request.args.get('error')
+    if error:
+        error_description = request.args.get('error_description', error)
+        return f"""
+        <html>
+        <body style="font-family: Arial; padding: 20px;">
+            <h2>❌ Authorization Failed</h2>
+            <p><strong>Error:</strong> {error}</p>
+            <p><strong>Description:</strong> {error_description}</p>
+            <hr>
+            <h3>Common Issues:</h3>
+            <ul>
+                <li><strong>Redirect URI mismatch:</strong> Make sure the redirect URI in your Spotify app settings matches exactly: <code>{spotify_api.redirect_uri}</code></li>
+                <li><strong>Invalid credentials:</strong> Check that your Client ID and Client Secret are correct in config.yaml</li>
+                <li><strong>App not approved:</strong> Make sure your Spotify app is saved in the Developer Dashboard</li>
+            </ul>
+            <p><a href="/auth">Try again</a></p>
+        </body>
+        </html>
+        """, 400
+    
     code = request.args.get('code')
     if not code:
         return jsonify({"error": "No authorization code provided"}), 400
     
-    if spotify_api.exchange_code_for_token(code):
-        return jsonify({
-            "status": "success",
-            "message": "Authorization successful! You can now use the API."
-        })
-    else:
-        return jsonify({"error": "Failed to exchange code for token"}), 400
+    try:
+        if spotify_api.exchange_code_for_token(code):
+            return """
+            <html>
+            <body style="font-family: Arial; padding: 20px; background: #1DB954; color: white;">
+                <h2>✅ Authorization Successful!</h2>
+                <p>You can now use the Spotify API.</p>
+                <p><a href="/" style="color: white;">Go to API</a></p>
+            </body>
+            </html>
+            """
+        else:
+            return """
+            <html>
+            <body style="font-family: Arial; padding: 20px;">
+                <h2>❌ Token Exchange Failed</h2>
+                <p>Failed to exchange authorization code for access token.</p>
+                <p>Check your Client Secret in config.yaml</p>
+                <p><a href="/auth">Try again</a></p>
+            </body>
+            </html>
+            """, 400
+    except Exception as e:
+        return f"""
+        <html>
+        <body style="font-family: Arial; padding: 20px;">
+            <h2>❌ Error</h2>
+            <p><strong>Error:</strong> {str(e)}</p>
+            <p><a href="/auth">Try again</a></p>
+        </body>
+        </html>
+        """, 500
 
 
 @app.route('/search')

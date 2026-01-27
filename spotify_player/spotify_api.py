@@ -52,6 +52,7 @@ class SpotifyAPI:
     
     def get_auth_url(self) -> str:
         """Get the authorization URL for user to visit."""
+        from urllib.parse import quote_plus
         scopes = "user-read-playback-state user-modify-playback-state user-read-currently-playing streaming"
         params = {
             "client_id": self.client_id,
@@ -60,7 +61,7 @@ class SpotifyAPI:
             "scope": scopes,
             "show_dialog": "true"
         }
-        query = "&".join([f"{k}={v}" for k, v in params.items()])
+        query = "&".join([f"{k}={quote_plus(str(v))}" for k, v in params.items()])
         return f"https://accounts.spotify.com/authorize?{query}"
     
     def exchange_code_for_token(self, code: str) -> bool:
