@@ -25,10 +25,5 @@ if systemctl is-enabled audio-player.service &>/dev/null; then
     sudo systemctl restart audio-player.service
 fi
 
-# Restart Spotify player service if it exists
-if systemctl is-enabled spotify-player.service &>/dev/null; then
-    echo "Restarting Spotify player service..."
-    sudo systemctl restart spotify-player.service
-fi
 
 echo "Post-update script completed successfully"
