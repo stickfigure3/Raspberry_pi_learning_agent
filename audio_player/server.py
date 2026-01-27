@@ -99,14 +99,13 @@ def play_audio(filename, volume=100):
     
     with PLAYBACK_LOCK:
         try:
-            # Use ALSA directly to ensure audio output (try headphones first, then auto)
-            # --audio-device=alsa/plughw:2,0 forces headphone output
-            # --audio-device=alsa/auto lets mpv choose
+            # Force headphone output (card 2, device 0)
+            # This ensures audio goes to the 3.5mm jack
             cmd = [
                 "mpv", 
                 "--no-video", 
                 f"--volume={volume}",
-                "--audio-device=alsa/auto",  # Auto-detect best audio device
+                "--audio-device=alsa/plughw:2,0",  # Force headphone output
                 "--really-quiet",  # Suppress output
                 str(filepath)
             ]
