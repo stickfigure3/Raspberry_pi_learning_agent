@@ -25,3 +25,6 @@ Thumbs.db
 # Config (keep template, ignore actual config)
 config.local.yaml
 secrets.yaml
+
+# Local Spotify downloader (not pushed to git)
+spotify_downloader/
