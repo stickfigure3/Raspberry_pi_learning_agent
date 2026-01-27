@@ -1,0 +1,15 @@
+[Unit]
+Description=Spotify Player Server with Queue
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=akash
+WorkingDirectory=/home/akash/raspberry_pi/spotify_player
+ExecStart=/usr/bin/python3 /home/akash/raspberry_pi/spotify_player/server.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

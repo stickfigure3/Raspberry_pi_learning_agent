@@ -1,0 +1,18 @@
+# Spotify API Configuration
+# Copy this to config.yaml and fill in your credentials
+
+spotify:
+  client_id: "your_spotify_client_id"
+  client_secret: "your_spotify_client_secret"
+  redirect_uri: "http://localhost:5001/callback"
+  
+# Spotify playback options
+playback:
+  # Use spotifyd (recommended) or librespot
+  player: "spotifyd"
+  device_name: "Raspberry Pi"
+  
+# Queue settings
+queue:
+  max_size: 100
+  auto_play: true
