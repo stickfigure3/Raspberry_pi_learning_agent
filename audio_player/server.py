@@ -99,8 +99,19 @@ def play_audio(filename, volume=100):
     
     with PLAYBACK_LOCK:
         try:
+            # Use ALSA directly to ensure audio output (try headphones first, then auto)
+            # --audio-device=alsa/plughw:2,0 forces headphone output
+            # --audio-device=alsa/auto lets mpv choose
+            cmd = [
+                "mpv", 
+                "--no-video", 
+                f"--volume={volume}",
+                "--audio-device=alsa/auto",  # Auto-detect best audio device
+                "--really-quiet",  # Suppress output
+                str(filepath)
+            ]
             CURRENT_PROCESS = subprocess.Popen(
-                ["mpv", "--no-video", f"--volume={volume}", str(filepath)],
+                cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
             )
@@ -108,8 +119,9 @@ def play_audio(filename, volume=100):
             return True, f"Playing: {filename}"
         except FileNotFoundError:
             if filepath.suffix.lower() == '.wav':
+                # Try aplay with specific device
                 CURRENT_PROCESS = subprocess.Popen(
-                    ["aplay", str(filepath)],
+                    ["aplay", "-D", "plughw:2,0", str(filepath)],  # Headphones device
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL
                 )

@@ -24,13 +24,16 @@ def test_audio_devices():
         print("✗ No ALSA devices found")
         print(result.stderr)
     
-    # Check for pulseaudio
-    result = subprocess.run(["pactl", "list", "short", "sinks"], capture_output=True, text=True)
-    if result.returncode == 0 and result.stdout.strip():
-        print("\n✓ PulseAudio sinks found:")
-        print(result.stdout)
-    else:
-        print("\n✗ No PulseAudio sinks found")
+    # Check for pulseaudio (optional)
+    try:
+        result = subprocess.run(["pactl", "list", "short", "sinks"], capture_output=True, text=True, timeout=1)
+        if result.returncode == 0 and result.stdout.strip():
+            print("\n✓ PulseAudio sinks found:")
+            print(result.stdout)
+        else:
+            print("\nℹ PulseAudio not available (using ALSA)")
+    except:
+        print("\nℹ PulseAudio not available (using ALSA)")
     
     return True
 
