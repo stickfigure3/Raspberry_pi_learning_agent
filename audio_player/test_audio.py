@@ -88,7 +88,7 @@ def generate_test_tone():
             "ffmpeg", "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
             "-ar", "44100", "-y", str(test_file)
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True, stderr=subprocess.DEVNULL)
+        result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, text=True)
         if result.returncode == 0:
             print(f"✓ Test tone generated: {test_file}")
             return str(test_file)
