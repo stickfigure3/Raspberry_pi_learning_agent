@@ -168,14 +168,23 @@ def play_audio(filename, volume=50):
 
 
 def set_volume(volume):
-    """Change volume of current playback."""
-    global CURRENT_VOLUME, CURRENT_PROCESS, CURRENT_FILE
+    """Change volume of current playback using amixer (no restart needed)."""
+    global CURRENT_VOLUME
     CURRENT_VOLUME = max(0, min(150, volume))
     
-    if CURRENT_FILE:
-        play_audio(CURRENT_FILE, CURRENT_VOLUME)
-        return True
-    return False
+    # Use amixer to change volume without restarting playback
+    # Map 0-150 to 0-100% for amixer (allow boost)
+    amixer_vol = min(100, int(volume * 100 / 150))
+    try:
+        subprocess.run(
+            ["amixer", "-c", "2", "sset", "PCM", f"{amixer_vol}%"],
+            capture_output=True,
+            timeout=5
+        )
+    except:
+        pass
+    
+    return True
 
 
 # HTML Template with Music Library Browser
