@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Raspberry Pi Control Panel
-A web interface for controlling audio playback with music library organization.
+A web interface for controlling audio playback with playlist/shuffle support.
 """
 
 import os
@@ -11,6 +11,7 @@ import json
 import threading
 import time
 import re
+import random
 from datetime import datetime
 from pathlib import Path
 from flask import Flask, jsonify, request, render_template_string
@@ -23,10 +24,17 @@ LIBRARY_FILE = AUDIO_DIR / "music_library.json"
 COMMAND_QUEUE_FILE = Path("/home/akash/raspberry_pi/logs/command_queue.json")
 AUDIO_DEVICE = "alsa/plughw:2,0"
 
-# State
+# Playback State
 CURRENT_PROCESS = None
 CURRENT_FILE = None
 CURRENT_VOLUME = 50
+PLAY_QUEUE = []  # List of filenames to play
+QUEUE_INDEX = 0  # Current position in queue
+SHUFFLE_MODE = False
+REPEAT_MODE = False  # Repeat queue when finished
+PLAYBACK_LOCK = threading.Lock()
+MONITOR_THREAD = None
+STOP_MONITOR = False
 
 # Ensure directories exist
 COMMAND_QUEUE_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -52,7 +60,6 @@ def save_library(library):
 def parse_song_filename(filename):
     """Parse artist and title from filename."""
     name = Path(filename).stem
-    # Try "Artist - Title" format
     parts = name.split(' - ', 1)
     if len(parts) == 2:
         return {'artist': parts[0].strip(), 'title': parts[1].strip()}
@@ -90,7 +97,6 @@ def get_organized_library():
     files = get_audio_files()
     library = load_library()
     
-    # Organize by artist
     by_artist = {}
     for f in files:
         artist = f['artist']
@@ -98,7 +104,6 @@ def get_organized_library():
             by_artist[artist] = []
         by_artist[artist].append(f)
     
-    # Organize by playlist
     by_playlist = {}
     for name, info in library.get('playlists', {}).items():
         playlist_files = []
@@ -124,56 +129,194 @@ def get_organized_library():
     }
 
 
-def stop_current():
-    """Stop currently playing audio."""
-    global CURRENT_PROCESS, CURRENT_FILE
-    if CURRENT_PROCESS:
-        try:
-            CURRENT_PROCESS.terminate()
-            CURRENT_PROCESS.wait(timeout=2)
-        except:
+def stop_playback():
+    """Stop currently playing audio and clear queue."""
+    global CURRENT_PROCESS, CURRENT_FILE, PLAY_QUEUE, QUEUE_INDEX, STOP_MONITOR
+    
+    with PLAYBACK_LOCK:
+        STOP_MONITOR = True
+        if CURRENT_PROCESS:
             try:
-                CURRENT_PROCESS.kill()
+                CURRENT_PROCESS.terminate()
+                CURRENT_PROCESS.wait(timeout=2)
             except:
-                pass
-    CURRENT_PROCESS = None
-    CURRENT_FILE = None
+                try:
+                    CURRENT_PROCESS.kill()
+                except:
+                    pass
+        CURRENT_PROCESS = None
+        CURRENT_FILE = None
+        PLAY_QUEUE = []
+        QUEUE_INDEX = 0
+    
     subprocess.run(["pkill", "-9", "mpv"], capture_output=True)
 
 
-def play_audio(filename, volume=50):
-    """Play an audio file."""
-    global CURRENT_PROCESS, CURRENT_FILE, CURRENT_VOLUME
+def play_file(filename):
+    """Play a single audio file (internal)."""
+    global CURRENT_PROCESS, CURRENT_FILE
     
     filepath = AUDIO_DIR / filename
     if not filepath.exists():
-        return False, f"File not found: {filename}"
+        return False
     
-    stop_current()
-    CURRENT_VOLUME = volume
+    # Kill any existing playback
+    if CURRENT_PROCESS:
+        try:
+            CURRENT_PROCESS.terminate()
+            CURRENT_PROCESS.wait(timeout=1)
+        except:
+            pass
+    subprocess.run(["pkill", "-9", "mpv"], capture_output=True)
     
     try:
         cmd = [
             "mpv", "--no-video",
-            f"--volume={volume}",
+            f"--volume={CURRENT_VOLUME}",
             f"--audio-device={AUDIO_DEVICE}",
             "--really-quiet",
             str(filepath)
         ]
         CURRENT_PROCESS = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         CURRENT_FILE = filename
-        return True, f"Playing: {filename}"
+        return True
     except Exception as e:
-        return False, str(e)
+        print(f"Play error: {e}")
+        return False
+
+
+def playback_monitor():
+    """Background thread to monitor playback and play next song."""
+    global CURRENT_PROCESS, QUEUE_INDEX, STOP_MONITOR
+    
+    while True:
+        if STOP_MONITOR:
+            break
+        
+        time.sleep(1)
+        
+        with PLAYBACK_LOCK:
+            if STOP_MONITOR:
+                break
+            
+            # Check if current song finished
+            if CURRENT_PROCESS and CURRENT_PROCESS.poll() is not None:
+                # Song finished, play next
+                if PLAY_QUEUE and QUEUE_INDEX < len(PLAY_QUEUE) - 1:
+                    QUEUE_INDEX += 1
+                    play_file(PLAY_QUEUE[QUEUE_INDEX])
+                elif PLAY_QUEUE and REPEAT_MODE:
+                    # Restart queue
+                    QUEUE_INDEX = 0
+                    if SHUFFLE_MODE:
+                        random.shuffle(PLAY_QUEUE)
+                    play_file(PLAY_QUEUE[QUEUE_INDEX])
+                else:
+                    # Queue finished
+                    CURRENT_PROCESS = None
+                    CURRENT_FILE = None
+
+
+def start_monitor():
+    """Start the playback monitor thread."""
+    global MONITOR_THREAD, STOP_MONITOR
+    
+    STOP_MONITOR = False
+    if MONITOR_THREAD is None or not MONITOR_THREAD.is_alive():
+        MONITOR_THREAD = threading.Thread(target=playback_monitor, daemon=True)
+        MONITOR_THREAD.start()
+
+
+def play_audio(filename, volume=50):
+    """Play a single audio file."""
+    global CURRENT_VOLUME, PLAY_QUEUE, QUEUE_INDEX, STOP_MONITOR
+    
+    with PLAYBACK_LOCK:
+        STOP_MONITOR = True
+        time.sleep(0.1)
+        
+        CURRENT_VOLUME = volume
+        PLAY_QUEUE = [filename]
+        QUEUE_INDEX = 0
+        
+        success = play_file(filename)
+        
+        STOP_MONITOR = False
+        start_monitor()
+        
+        if success:
+            return True, f"Playing: {filename}"
+        return False, f"Failed to play: {filename}"
+
+
+def play_queue(files, shuffle=False, volume=None):
+    """Play a queue of files with optional shuffle."""
+    global CURRENT_VOLUME, PLAY_QUEUE, QUEUE_INDEX, SHUFFLE_MODE, REPEAT_MODE, STOP_MONITOR
+    
+    if not files:
+        return False, "No files to play"
+    
+    with PLAYBACK_LOCK:
+        STOP_MONITOR = True
+        time.sleep(0.1)
+        
+        if volume is not None:
+            CURRENT_VOLUME = volume
+        
+        SHUFFLE_MODE = shuffle
+        REPEAT_MODE = True  # Keep playing
+        PLAY_QUEUE = list(files)
+        
+        if shuffle:
+            random.shuffle(PLAY_QUEUE)
+        
+        QUEUE_INDEX = 0
+        success = play_file(PLAY_QUEUE[0])
+        
+        STOP_MONITOR = False
+        start_monitor()
+        
+        mode = "shuffle" if shuffle else "queue"
+        if success:
+            return True, f"Playing {len(PLAY_QUEUE)} songs ({mode})"
+        return False, "Failed to start playback"
+
+
+def skip_track():
+    """Skip to next track in queue."""
+    global QUEUE_INDEX
+    
+    with PLAYBACK_LOCK:
+        if PLAY_QUEUE and QUEUE_INDEX < len(PLAY_QUEUE) - 1:
+            QUEUE_INDEX += 1
+            play_file(PLAY_QUEUE[QUEUE_INDEX])
+            return True, f"Skipped to: {PLAY_QUEUE[QUEUE_INDEX]}"
+        elif PLAY_QUEUE and REPEAT_MODE:
+            QUEUE_INDEX = 0
+            if SHUFFLE_MODE:
+                random.shuffle(PLAY_QUEUE)
+            play_file(PLAY_QUEUE[QUEUE_INDEX])
+            return True, f"Restarted queue: {PLAY_QUEUE[QUEUE_INDEX]}"
+        return False, "No next track"
+
+
+def prev_track():
+    """Go to previous track in queue."""
+    global QUEUE_INDEX
+    
+    with PLAYBACK_LOCK:
+        if PLAY_QUEUE and QUEUE_INDEX > 0:
+            QUEUE_INDEX -= 1
+            play_file(PLAY_QUEUE[QUEUE_INDEX])
+            return True, f"Previous: {PLAY_QUEUE[QUEUE_INDEX]}"
+        return False, "No previous track"
 
 
 def set_volume(volume):
-    """Change volume of current playback using amixer (no restart needed)."""
+    """Change volume using amixer (no restart needed)."""
     global CURRENT_VOLUME
     CURRENT_VOLUME = max(0, min(150, volume))
     
-    # Use amixer to change volume without restarting playback
-    # Map 0-150 to 0-100% for amixer (allow boost)
     amixer_vol = min(100, int(volume * 100 / 150))
     try:
         subprocess.run(
@@ -187,7 +330,7 @@ def set_volume(volume):
     return True
 
 
-# HTML Template with Music Library Browser
+# HTML Template with Shuffle/Queue Controls
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="en">
@@ -210,7 +353,6 @@ HTML_TEMPLATE = '''
             --text: #e8e8e8;
             --text-dim: #888;
             --danger: #ff4757;
-            --warning: #ffa502;
         }
         
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -226,11 +368,7 @@ HTML_TEMPLATE = '''
         
         .container { max-width: 700px; margin: 0 auto; }
         
-        header {
-            text-align: center;
-            margin-bottom: 30px;
-            padding: 20px;
-        }
+        header { text-align: center; margin-bottom: 30px; padding: 20px; }
         
         h1 {
             font-family: 'Space Mono', monospace;
@@ -278,7 +416,6 @@ HTML_TEMPLATE = '''
             margin-bottom: 15px;
         }
         
-        /* Now Playing */
         .now-playing {
             background: linear-gradient(135deg, var(--bg-card) 0%, #1a1a2e 100%);
             border: 1px solid var(--accent-dim);
@@ -289,7 +426,7 @@ HTML_TEMPLATE = '''
             display: flex;
             align-items: center;
             gap: 15px;
-            margin-bottom: 20px;
+            margin-bottom: 15px;
         }
         
         .music-icon {
@@ -315,8 +452,13 @@ HTML_TEMPLATE = '''
             color: var(--text-dim);
         }
         
-        /* Volume Control */
-        .volume-control { margin: 20px 0; }
+        .queue-info {
+            font-size: 0.8rem;
+            color: var(--accent);
+            margin-top: 5px;
+        }
+        
+        .volume-control { margin: 15px 0; }
         
         .volume-label {
             display: flex;
@@ -344,20 +486,18 @@ HTML_TEMPLATE = '''
             box-shadow: 0 0 10px var(--accent);
         }
         
-        /* Playback Controls */
         .controls {
             display: flex;
             justify-content: center;
-            gap: 15px;
+            align-items: center;
+            gap: 12px;
             margin-top: 20px;
         }
         
         .control-btn {
-            width: 60px;
-            height: 60px;
             border: none;
             border-radius: 50%;
-            font-size: 1.5rem;
+            font-size: 1.2rem;
             cursor: pointer;
             transition: all 0.2s;
             display: flex;
@@ -365,12 +505,60 @@ HTML_TEMPLATE = '''
             justify-content: center;
         }
         
-        .control-btn.play { background: var(--accent); color: var(--bg-dark); }
-        .control-btn.stop { background: rgba(255,255,255,0.1); color: var(--text); }
+        .control-btn.small {
+            width: 45px;
+            height: 45px;
+            background: rgba(255,255,255,0.1);
+            color: var(--text);
+        }
+        
+        .control-btn.play {
+            width: 65px;
+            height: 65px;
+            background: var(--accent);
+            color: var(--bg-dark);
+            font-size: 1.5rem;
+        }
+        
+        .control-btn.stop {
+            width: 50px;
+            height: 50px;
+            background: rgba(255,255,255,0.1);
+            color: var(--text);
+        }
+        
         .control-btn:hover { transform: scale(1.1); }
         .control-btn:active { transform: scale(0.95); }
         
-        /* Tabs */
+        .control-btn.active {
+            background: var(--accent);
+            color: var(--bg-dark);
+        }
+        
+        .mode-toggles {
+            display: flex;
+            justify-content: center;
+            gap: 15px;
+            margin-top: 15px;
+        }
+        
+        .mode-btn {
+            padding: 8px 16px;
+            border: 1px solid rgba(255,255,255,0.2);
+            border-radius: 20px;
+            background: transparent;
+            color: var(--text-dim);
+            font-size: 0.85rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .mode-btn.active {
+            background: var(--accent);
+            color: var(--bg-dark);
+            border-color: var(--accent);
+        }
+        
         .tabs {
             display: flex;
             gap: 5px;
@@ -403,7 +591,6 @@ HTML_TEMPLATE = '''
             color: var(--text);
         }
         
-        /* Search */
         .search-box {
             width: 100%;
             padding: 12px 15px;
@@ -415,22 +602,12 @@ HTML_TEMPLATE = '''
             font-size: 0.95rem;
             margin-bottom: 15px;
             outline: none;
-            transition: border-color 0.2s;
         }
         
-        .search-box:focus {
-            border-color: var(--accent);
-        }
+        .search-box:focus { border-color: var(--accent); }
+        .search-box::placeholder { color: var(--text-dim); }
         
-        .search-box::placeholder {
-            color: var(--text-dim);
-        }
-        
-        /* Song List */
-        .song-list {
-            max-height: 400px;
-            overflow-y: auto;
-        }
+        .song-list { max-height: 400px; overflow-y: auto; }
         
         .song-item {
             display: flex;
@@ -450,11 +627,11 @@ HTML_TEMPLATE = '''
             border-left: 3px solid var(--accent);
         }
         
-        .song-details {
-            flex: 1;
-            overflow: hidden;
-            margin-right: 10px;
+        .song-item.in-queue {
+            border-left: 3px solid var(--accent-3);
         }
+        
+        .song-details { flex: 1; overflow: hidden; margin-right: 10px; }
         
         .song-title {
             font-size: 0.95rem;
@@ -466,18 +643,30 @@ HTML_TEMPLATE = '''
         .song-artist {
             font-size: 0.8rem;
             color: var(--text-dim);
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
         }
         
-        .song-size {
-            font-size: 0.75rem;
-            color: var(--text-dim);
-            white-space: nowrap;
+        .song-actions {
+            display: flex;
+            gap: 8px;
         }
         
-        /* Group Headers */
+        .song-btn {
+            width: 32px;
+            height: 32px;
+            border: none;
+            border-radius: 50%;
+            background: rgba(255,255,255,0.1);
+            color: var(--text);
+            cursor: pointer;
+            font-size: 0.9rem;
+            transition: all 0.2s;
+        }
+        
+        .song-btn:hover {
+            background: var(--accent);
+            color: var(--bg-dark);
+        }
+        
         .group-header {
             display: flex;
             justify-content: space-between;
@@ -505,13 +694,23 @@ HTML_TEMPLATE = '''
             border-radius: 10px;
         }
         
+        .group-header .play-all {
+            padding: 5px 12px;
+            border: none;
+            border-radius: 15px;
+            background: var(--accent);
+            color: var(--bg-dark);
+            font-size: 0.75rem;
+            cursor: pointer;
+            margin-left: 10px;
+        }
+        
         .group-songs {
             margin-left: 10px;
             border-left: 2px solid rgba(255,255,255,0.1);
             padding-left: 10px;
         }
         
-        /* Stats */
         .stats {
             display: flex;
             gap: 20px;
@@ -532,7 +731,6 @@ HTML_TEMPLATE = '''
             color: var(--accent);
         }
         
-        /* System Controls */
         .system-grid {
             display: grid;
             grid-template-columns: repeat(2, 1fr);
@@ -559,9 +757,7 @@ HTML_TEMPLATE = '''
         .system-btn.secondary { background: rgba(255,255,255,0.1); color: var(--text); }
         .system-btn.danger { background: rgba(255,71,87,0.2); color: var(--danger); }
         .system-btn:hover { transform: translateY(-2px); }
-        .system-btn:active { transform: translateY(0); }
         
-        /* Toast Notifications */
         .toast-container {
             position: fixed;
             bottom: 20px;
@@ -587,7 +783,6 @@ HTML_TEMPLATE = '''
             to { opacity: 1; transform: translateY(0); }
         }
         
-        /* Empty State */
         .empty-state {
             text-align: center;
             padding: 40px 20px;
@@ -596,14 +791,12 @@ HTML_TEMPLATE = '''
         
         .empty-state .icon { font-size: 3rem; margin-bottom: 15px; }
         
-        /* Responsive */
         @media (max-width: 480px) {
             body { padding: 15px; }
             h1 { font-size: 1.5rem; }
             .card { padding: 15px; }
-            .control-btn { width: 50px; height: 50px; font-size: 1.2rem; }
-            .tabs { gap: 3px; }
-            .tab { padding: 8px 12px; font-size: 0.8rem; }
+            .control-btn.play { width: 55px; height: 55px; font-size: 1.3rem; }
+            .control-btn.small { width: 40px; height: 40px; font-size: 1rem; }
         }
     </style>
 </head>
@@ -625,6 +818,7 @@ HTML_TEMPLATE = '''
                 <div class="track-info">
                     <h2 id="current-track">Nothing playing</h2>
                     <p id="current-status">Select a song below</p>
+                    <p class="queue-info" id="queue-info"></p>
                 </div>
             </div>
             
@@ -637,8 +831,15 @@ HTML_TEMPLATE = '''
             </div>
             
             <div class="controls">
+                <button class="control-btn small" onclick="prevTrack()" title="Previous">⏮</button>
                 <button class="control-btn stop" onclick="stopAudio()" title="Stop">⏹</button>
                 <button class="control-btn play" onclick="playSelected()" title="Play">▶</button>
+                <button class="control-btn small" onclick="skipTrack()" title="Next">⏭</button>
+            </div>
+            
+            <div class="mode-toggles">
+                <button class="mode-btn" id="shuffle-btn" onclick="toggleShuffle()">🔀 Shuffle</button>
+                <button class="mode-btn active" id="repeat-btn" onclick="toggleRepeat()">🔁 Repeat</button>
             </div>
         </div>
         
@@ -646,19 +847,10 @@ HTML_TEMPLATE = '''
         <div class="card">
             <div class="card-title">🎧 Music Library</div>
             
-            <div class="stats" id="library-stats">
-                <div class="stat">
-                    <span>Songs:</span>
-                    <span class="stat-value" id="stat-songs">0</span>
-                </div>
-                <div class="stat">
-                    <span>Artists:</span>
-                    <span class="stat-value" id="stat-artists">0</span>
-                </div>
-                <div class="stat">
-                    <span>Playlists:</span>
-                    <span class="stat-value" id="stat-playlists">0</span>
-                </div>
+            <div class="stats">
+                <div class="stat">Songs: <span class="stat-value" id="stat-songs">0</span></div>
+                <div class="stat">Artists: <span class="stat-value" id="stat-artists">0</span></div>
+                <div class="stat">Playlists: <span class="stat-value" id="stat-playlists">0</span></div>
             </div>
             
             <div class="tabs">
@@ -670,10 +862,7 @@ HTML_TEMPLATE = '''
             <input type="text" class="search-box" id="search-box" placeholder="🔍 Search songs, artists...">
             
             <div class="song-list" id="song-list">
-                <div class="empty-state">
-                    <div class="icon">🎵</div>
-                    <p>Loading songs...</p>
-                </div>
+                <div class="empty-state"><div class="icon">🎵</div><p>Loading...</p></div>
             </div>
         </div>
         
@@ -682,20 +871,16 @@ HTML_TEMPLATE = '''
             <div class="card-title">⚙️ System</div>
             <div class="system-grid">
                 <button class="system-btn secondary" onclick="gitPull()">
-                    <span class="icon">📥</span>
-                    Git Pull
+                    <span class="icon">📥</span>Git Pull
                 </button>
                 <button class="system-btn secondary" onclick="refreshLibrary()">
-                    <span class="icon">🔄</span>
-                    Refresh
+                    <span class="icon">🔄</span>Refresh
                 </button>
                 <button class="system-btn danger" onclick="systemAction('reboot')">
-                    <span class="icon">🔁</span>
-                    Reboot
+                    <span class="icon">🔁</span>Reboot
                 </button>
                 <button class="system-btn danger" onclick="systemAction('shutdown')">
-                    <span class="icon">⏻</span>
-                    Shutdown
+                    <span class="icon">⏻</span>Shutdown
                 </button>
             </div>
         </div>
@@ -704,15 +889,15 @@ HTML_TEMPLATE = '''
     <div class="toast-container" id="toast-container"></div>
     
     <script>
-        // State
         let library = { all: [], by_artist: {}, by_playlist: {}, stats: {} };
         let selectedSong = null;
         let currentView = 'all';
         let searchQuery = '';
         let currentVolume = 50;
         let expandedGroups = new Set();
+        let shuffleMode = false;
+        let repeatMode = true;
         
-        // Load saved state
         function loadState() {
             const savedVolume = localStorage.getItem('piControlVolume');
             if (savedVolume) {
@@ -726,7 +911,6 @@ HTML_TEMPLATE = '''
             localStorage.setItem('piControlVolume', currentVolume.toString());
         }
         
-        // Toast
         function showToast(message, isError = false) {
             const container = document.getElementById('toast-container');
             const toast = document.createElement('div');
@@ -736,39 +920,30 @@ HTML_TEMPLATE = '''
             setTimeout(() => toast.remove(), 3000);
         }
         
-        // Fetch library
         async function fetchLibrary() {
             try {
                 const res = await fetch('/api/library');
                 library = await res.json();
-                
                 document.getElementById('stat-songs').textContent = library.stats.total_songs || 0;
                 document.getElementById('stat-artists').textContent = library.stats.total_artists || 0;
                 document.getElementById('stat-playlists').textContent = library.stats.total_playlists || 0;
-                
                 renderLibrary();
             } catch (e) {
                 showToast('Failed to load library', true);
             }
         }
         
-        // Render based on current view
         function renderLibrary() {
             const list = document.getElementById('song-list');
             const query = searchQuery.toLowerCase();
             
-            if (currentView === 'all') {
-                renderAllSongs(list, query);
-            } else if (currentView === 'artists') {
-                renderByArtist(list, query);
-            } else if (currentView === 'playlists') {
-                renderByPlaylist(list, query);
-            }
+            if (currentView === 'all') renderAllSongs(list, query);
+            else if (currentView === 'artists') renderByArtist(list, query);
+            else if (currentView === 'playlists') renderByPlaylist(list, query);
         }
         
         function renderAllSongs(container, query) {
             let songs = library.all || [];
-            
             if (query) {
                 songs = songs.filter(s => 
                     s.name.toLowerCase().includes(query) ||
@@ -789,62 +964,46 @@ HTML_TEMPLATE = '''
             const artists = library.by_artist || {};
             let html = '';
             
-            const sortedArtists = Object.keys(artists).sort();
-            
-            for (const artist of sortedArtists) {
+            for (const artist of Object.keys(artists).sort()) {
                 let songs = artists[artist];
-                
                 if (query) {
                     songs = songs.filter(s => 
                         s.name.toLowerCase().includes(query) ||
-                        artist.toLowerCase().includes(query) ||
-                        s.title.toLowerCase().includes(query)
+                        artist.toLowerCase().includes(query)
                     );
                 }
-                
                 if (songs.length === 0) continue;
                 
                 const isExpanded = expandedGroups.has('artist-' + artist);
+                const artistFiles = songs.map(s => s.name);
                 
                 html += `
                     <div class="group-header" onclick="toggleGroup('artist-${artist.replace(/'/g, "\\'")}')">
                         <h3>👤 ${artist}</h3>
-                        <span class="count">${songs.length} songs</span>
+                        <div>
+                            <span class="count">${songs.length}</span>
+                            <button class="play-all" onclick="event.stopPropagation(); playArtist('${artist.replace(/'/g, "\\'")}')">▶ Play All</button>
+                        </div>
                     </div>
                 `;
                 
                 if (isExpanded) {
-                    html += '<div class="group-songs">';
-                    html += songs.map(song => renderSongItem(song)).join('');
-                    html += '</div>';
+                    html += '<div class="group-songs">' + songs.map(song => renderSongItem(song)).join('') + '</div>';
                 }
             }
             
-            if (!html) {
-                container.innerHTML = '<div class="empty-state"><div class="icon">👤</div><p>No artists found</p></div>';
-                return;
-            }
-            
-            container.innerHTML = html;
+            container.innerHTML = html || '<div class="empty-state"><div class="icon">👤</div><p>No artists found</p></div>';
         }
         
         function renderByPlaylist(container, query) {
             const playlists = library.by_playlist || {};
             let html = '';
             
-            const sortedPlaylists = Object.keys(playlists).sort();
-            
-            for (const name of sortedPlaylists) {
+            for (const name of Object.keys(playlists).sort()) {
                 let songs = playlists[name].songs || [];
-                
-                if (query) {
-                    songs = songs.filter(s => 
-                        s.name.toLowerCase().includes(query) ||
-                        name.toLowerCase().includes(query) ||
-                        s.title.toLowerCase().includes(query)
-                    );
+                if (query && !name.toLowerCase().includes(query)) {
+                    songs = songs.filter(s => s.name.toLowerCase().includes(query));
                 }
-                
                 if (songs.length === 0 && !name.toLowerCase().includes(query)) continue;
                 
                 const isExpanded = expandedGroups.has('playlist-' + name);
@@ -852,27 +1011,21 @@ HTML_TEMPLATE = '''
                 html += `
                     <div class="group-header playlist" onclick="toggleGroup('playlist-${name.replace(/'/g, "\\'")}')">
                         <h3>📁 ${name}</h3>
-                        <span class="count">${songs.length} songs</span>
+                        <div>
+                            <span class="count">${songs.length}</span>
+                            <button class="play-all" onclick="event.stopPropagation(); playPlaylist('${name.replace(/'/g, "\\'")}')">▶ Shuffle</button>
+                        </div>
                     </div>
                 `;
                 
                 if (isExpanded) {
                     html += '<div class="group-songs">';
-                    if (songs.length > 0) {
-                        html += songs.map(song => renderSongItem(song)).join('');
-                    } else {
-                        html += '<div class="empty-state"><p>No songs in this playlist</p></div>';
-                    }
+                    html += songs.length > 0 ? songs.map(song => renderSongItem(song)).join('') : '<div class="empty-state"><p>Empty playlist</p></div>';
                     html += '</div>';
                 }
             }
             
-            if (!html) {
-                container.innerHTML = '<div class="empty-state"><div class="icon">📁</div><p>No playlists found</p></div>';
-                return;
-            }
-            
-            container.innerHTML = html;
+            container.innerHTML = html || '<div class="empty-state"><div class="icon">📁</div><p>No playlists</p></div>';
         }
         
         function renderSongItem(song) {
@@ -883,21 +1036,19 @@ HTML_TEMPLATE = '''
                         <div class="song-title">${song.title || song.name}</div>
                         <div class="song-artist">${song.artist || 'Unknown'}</div>
                     </div>
-                    <span class="song-size">${song.size_mb} MB</span>
+                    <div class="song-actions">
+                        <button class="song-btn" onclick="event.stopPropagation(); playSingle('${song.name.replace(/'/g, "\\'")}')">▶</button>
+                    </div>
                 </div>
             `;
         }
         
         function toggleGroup(groupId) {
-            if (expandedGroups.has(groupId)) {
-                expandedGroups.delete(groupId);
-            } else {
-                expandedGroups.add(groupId);
-            }
+            if (expandedGroups.has(groupId)) expandedGroups.delete(groupId);
+            else expandedGroups.add(groupId);
             renderLibrary();
         }
         
-        // Tab switching
         document.querySelectorAll('.tab').forEach(tab => {
             tab.addEventListener('click', () => {
                 document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -907,57 +1058,137 @@ HTML_TEMPLATE = '''
             });
         });
         
-        // Search
         document.getElementById('search-box').addEventListener('input', (e) => {
             searchQuery = e.target.value;
             renderLibrary();
         });
         
-        // Select song
         function selectSong(name) {
             selectedSong = name;
             renderLibrary();
         }
         
-        // Play selected
+        function playSingle(name) {
+            fetch('/api/play', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({file: name, volume: currentVolume})
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.success) {
+                    selectedSong = name;
+                    refreshStatus();
+                    showToast('Playing: ' + name);
+                } else {
+                    showToast(data.error || 'Failed', true);
+                }
+            });
+        }
+        
         function playSelected() {
             if (!selectedSong) {
                 showToast('Select a song first', true);
                 return;
             }
+            playSingle(selectedSong);
+        }
+        
+        function playPlaylist(name) {
+            const playlist = library.by_playlist[name];
+            if (!playlist || !playlist.songs.length) {
+                showToast('Playlist is empty', true);
+                return;
+            }
             
-            fetch('/api/play', {
+            const files = playlist.songs.map(s => s.name);
+            fetch('/api/queue', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({file: selectedSong, volume: currentVolume})
+                body: JSON.stringify({files: files, shuffle: true, volume: currentVolume})
             })
             .then(res => res.json())
             .then(data => {
                 if (data.success) {
-                    const song = library.all.find(s => s.name === selectedSong);
-                    document.getElementById('current-track').textContent = song ? song.title : selectedSong;
-                    document.getElementById('current-status').textContent = song ? song.artist : 'Playing';
-                    showToast('Playing: ' + (song ? song.title : selectedSong));
+                    shuffleMode = true;
+                    document.getElementById('shuffle-btn').classList.add('active');
+                    refreshStatus();
+                    showToast('Shuffling ' + name);
                 } else {
-                    showToast(data.error || 'Failed to play', true);
+                    showToast(data.error || 'Failed', true);
                 }
-            })
-            .catch(() => showToast('Connection error', true));
+            });
         }
         
-        // Stop audio
+        function playArtist(artist) {
+            const songs = library.by_artist[artist];
+            if (!songs || !songs.length) return;
+            
+            const files = songs.map(s => s.name);
+            fetch('/api/queue', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({files: files, shuffle: shuffleMode, volume: currentVolume})
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.success) {
+                    refreshStatus();
+                    showToast('Playing ' + artist);
+                }
+            });
+        }
+        
         function stopAudio() {
             fetch('/api/stop', {method: 'POST'})
             .then(res => res.json())
             .then(data => {
                 document.getElementById('current-track').textContent = 'Nothing playing';
                 document.getElementById('current-status').textContent = 'Stopped';
+                document.getElementById('queue-info').textContent = '';
                 showToast('Stopped');
-            })
-            .catch(() => showToast('Connection error', true));
+            });
         }
         
-        // Volume control
+        function skipTrack() {
+            fetch('/api/skip', {method: 'POST'})
+            .then(res => res.json())
+            .then(data => {
+                if (data.success) {
+                    refreshStatus();
+                    showToast('Skipped');
+                }
+            });
+        }
+        
+        function prevTrack() {
+            fetch('/api/prev', {method: 'POST'})
+            .then(res => res.json())
+            .then(data => {
+                if (data.success) {
+                    refreshStatus();
+                    showToast('Previous');
+                }
+            });
+        }
+        
+        function toggleShuffle() {
+            shuffleMode = !shuffleMode;
+            document.getElementById('shuffle-btn').classList.toggle('active', shuffleMode);
+            showToast('Shuffle: ' + (shuffleMode ? 'ON' : 'OFF'));
+        }
+        
+        function toggleRepeat() {
+            repeatMode = !repeatMode;
+            document.getElementById('repeat-btn').classList.toggle('active', repeatMode);
+            fetch('/api/repeat', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({repeat: repeatMode})
+            });
+            showToast('Repeat: ' + (repeatMode ? 'ON' : 'OFF'));
+        }
+        
         document.getElementById('volume-slider').addEventListener('input', function(e) {
             currentVolume = parseInt(e.target.value);
             document.getElementById('volume-display').textContent = currentVolume + '%';
@@ -969,53 +1200,36 @@ HTML_TEMPLATE = '''
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({volume: currentVolume})
-            })
-            .then(res => res.json())
-            .then(data => {
-                if (data.success) showToast('Volume: ' + currentVolume + '%');
             });
         });
         
-        // Git pull
         async function gitPull() {
-            showToast('Pulling updates...');
-            try {
-                const res = await fetch('/api/execute', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({action: 'git_pull'})
-                });
-                const data = await res.json();
-                showToast(data.success ? 'Updated!' : 'Pull failed', !data.success);
-                if (data.success) fetchLibrary();
-            } catch (e) {
-                showToast('Connection error', true);
-            }
+            showToast('Pulling...');
+            const res = await fetch('/api/execute', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({action: 'git_pull'})
+            });
+            const data = await res.json();
+            showToast(data.success ? 'Updated!' : 'Failed', !data.success);
+            if (data.success) fetchLibrary();
         }
         
-        // System action
         function systemAction(action) {
-            if (!confirm(`Are you sure you want to ${action} the Pi?`)) return;
-            
+            if (!confirm(`${action} the Pi?`)) return;
             fetch('/api/execute', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({action: action})
-            })
-            .then(res => res.json())
-            .then(data => showToast(data.message))
-            .catch(() => showToast('Connection error', true));
+            }).then(res => res.json()).then(data => showToast(data.message));
         }
         
-        // Refresh library
         async function refreshLibrary() {
-            showToast('Refreshing...');
             await fetchLibrary();
             await refreshStatus();
             showToast('Refreshed!');
         }
         
-        // Refresh status
         async function refreshStatus() {
             try {
                 const res = await fetch('/api/status');
@@ -1025,9 +1239,18 @@ HTML_TEMPLATE = '''
                     const song = library.all.find(s => s.name === data.file);
                     document.getElementById('current-track').textContent = song ? song.title : data.file;
                     document.getElementById('current-status').textContent = song ? song.artist : 'Playing';
+                    
+                    if (data.queue_length > 1) {
+                        document.getElementById('queue-info').textContent = 
+                            `Track ${data.queue_index + 1} of ${data.queue_length}` + 
+                            (data.shuffle ? ' (shuffle)' : '');
+                    } else {
+                        document.getElementById('queue-info').textContent = '';
+                    }
                 } else {
                     document.getElementById('current-track').textContent = 'Nothing playing';
                     document.getElementById('current-status').textContent = 'Stopped';
+                    document.getElementById('queue-info').textContent = '';
                 }
                 
                 if (data.volume !== undefined) {
@@ -1035,16 +1258,13 @@ HTML_TEMPLATE = '''
                     document.getElementById('volume-slider').value = currentVolume;
                     document.getElementById('volume-display').textContent = currentVolume + '%';
                 }
-            } catch (e) {
-                console.error('Status refresh failed');
-            }
+            } catch (e) {}
         }
         
-        // Initialize
         loadState();
         fetchLibrary();
         refreshStatus();
-        setInterval(refreshStatus, 30000);
+        setInterval(refreshStatus, 3000);
     </script>
 </body>
 </html>
@@ -1071,7 +1291,7 @@ def api_library():
 def api_play():
     data = request.get_json() or {}
     filename = data.get('file', '')
-    volume = data.get('volume', 50)
+    volume = data.get('volume', CURRENT_VOLUME)
     
     if not filename:
         return jsonify({'success': False, 'error': 'No file specified'})
@@ -1080,10 +1300,33 @@ def api_play():
     return jsonify({'success': success, 'message': msg, 'error': None if success else msg})
 
 
+@app.route('/api/queue', methods=['POST'])
+def api_queue():
+    data = request.get_json() or {}
+    files = data.get('files', [])
+    shuffle = data.get('shuffle', False)
+    volume = data.get('volume')
+    
+    success, msg = play_queue(files, shuffle=shuffle, volume=volume)
+    return jsonify({'success': success, 'message': msg})
+
+
 @app.route('/api/stop', methods=['POST'])
 def api_stop():
-    stop_current()
+    stop_playback()
     return jsonify({'success': True, 'message': 'Stopped'})
+
+
+@app.route('/api/skip', methods=['POST'])
+def api_skip():
+    success, msg = skip_track()
+    return jsonify({'success': success, 'message': msg})
+
+
+@app.route('/api/prev', methods=['POST'])
+def api_prev():
+    success, msg = prev_track()
+    return jsonify({'success': success, 'message': msg})
 
 
 @app.route('/api/volume', methods=['POST'])
@@ -1094,12 +1337,24 @@ def api_volume():
     return jsonify({'success': True, 'volume': CURRENT_VOLUME})
 
 
+@app.route('/api/repeat', methods=['POST'])
+def api_repeat():
+    global REPEAT_MODE
+    data = request.get_json() or {}
+    REPEAT_MODE = data.get('repeat', True)
+    return jsonify({'success': True, 'repeat': REPEAT_MODE})
+
+
 @app.route('/api/status')
 def api_status():
     return jsonify({
         'playing': CURRENT_PROCESS is not None and CURRENT_PROCESS.poll() is None,
         'file': CURRENT_FILE,
-        'volume': CURRENT_VOLUME
+        'volume': CURRENT_VOLUME,
+        'queue_length': len(PLAY_QUEUE),
+        'queue_index': QUEUE_INDEX,
+        'shuffle': SHUFFLE_MODE,
+        'repeat': REPEAT_MODE
     })
 
 
@@ -1108,21 +1363,7 @@ def api_execute():
     data = request.get_json() or {}
     action = data.get('action', '')
     
-    if action == 'play':
-        details = data.get('details', {})
-        success, msg = play_audio(details.get('file', ''), details.get('volume', 50))
-        return jsonify({'success': success, 'message': msg})
-    
-    elif action == 'stop':
-        stop_current()
-        return jsonify({'success': True, 'message': 'Stopped'})
-    
-    elif action == 'volume':
-        details = data.get('details', {})
-        set_volume(details.get('volume', 50))
-        return jsonify({'success': True, 'message': f'Volume: {CURRENT_VOLUME}%'})
-    
-    elif action == 'git_pull':
+    if action == 'git_pull':
         try:
             result = subprocess.run(
                 ['git', 'pull'],
@@ -1131,10 +1372,7 @@ def api_execute():
                 text=True,
                 timeout=30
             )
-            return jsonify({
-                'success': result.returncode == 0,
-                'message': result.stdout or result.stderr
-            })
+            return jsonify({'success': result.returncode == 0, 'message': result.stdout or result.stderr})
         except Exception as e:
             return jsonify({'success': False, 'message': str(e)})
     
@@ -1152,6 +1390,5 @@ def api_execute():
 if __name__ == '__main__':
     print("🍓 Pi Control Panel starting...")
     print(f"   Audio directory: {AUDIO_DIR}")
-    print(f"   Audio device: {AUDIO_DEVICE}")
-    print("   Open http://YOUR_PI_IP:5000 in your browser")
+    start_monitor()
     app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
